@@ -3,8 +3,10 @@ package attoparsec
 import scalaz._
 import scalaz.Scalaz._
 
+import language.implicitConversions
+import language.higherKinds
 
-abstract class Parser[+A] { m => 
+abstract class Parser[+A] { m =>
   import Parser._
   import Parser.Internal._
   def apply[R](st0: State, kf:Failure[R], ks: Success[A,R]): Result[R]
@@ -12,30 +14,34 @@ abstract class Parser[+A] { m =>
 
   def flatMap[B](f: A => Parser[B]): Parser[B] = new Parser[B] {
     override def toString = m infix "flatMap ..."
-    def apply[R](st0: State, kf: Failure[R], ks: Success[B,R]): Result[R] = 
+    def apply[R](st0: State, kf: Failure[R], ks: Success[B,R]): Result[R] =
       m(st0,kf,(s:State, a:A) => f(a)(s,kf,ks))
   }
-  def map[B](f: A => B): Parser[B] = new Parser[B] { 
+  def map[B](f: A => B): Parser[B] = new Parser[B] {
     override def toString = m infix "map ..."
     def apply[R](st0: State, kf: Failure[R], ks: Success[B,R]): Result[R] =
       m(st0,kf,(s:State, a:A) => ks(s,f(a)))
   }
 
-  class WithFilter(p: A => Boolean) extends Parser[A] { 
+  class WithFilter(p: A => Boolean) extends Parser[A] { wf =>
     override def toString = m infix "withFilter ..."
     def apply[R](st0: State, kf: Failure[R], ks: Success[A,R]): Result[R] =
       m(st0,kf,(s:State, a:A) => if (p(a)) ks(s,a) else kf(s, Nil, "withFilter"))
     override def map[B](f: A => B) = m filter p map f
-    override def flatMap[B](f: A => Parser[B]) = m filter p flatMap f
+    override def flatMap[B](f: A => Parser[B]) = new Parser[B] {
+      override def toString = wf.toString
+      def apply[R](st0: State, kf: Failure[R], ks: Success[B,R]): Result[R] =
+        m(st0,kf,(s:State, a:A) => if (p(a)) f(a)(s,kf,ks) else kf(s, Nil, "withFilter"))
+    }
     override def withFilter(q: A => Boolean): WithFilter =
       new WithFilter(x => p(x) && q(x))
-    override def filter(q: A => Boolean): WithFilter = 
+    override def filter(q: A => Boolean): WithFilter =
       new WithFilter(x => p(x) && q(x))
   }
   def withFilter(p: A => Boolean): WithFilter = new WithFilter(p)
   def filter(p: A => Boolean): Parser[A]      = new WithFilter(p)
 
-  final def ~> [B](n: Parser[B]): Parser[B] = new Parser[B] { 
+  final def ~> [B](n: Parser[B]): Parser[B] = new Parser[B] {
     override def toString = m infix ("~> " + n)
     def apply[R](st0: State, kf: Failure[R], ks: Success[B,R]): Result[R] =
       m(st0,kf,(s:State, a: A) => n(s, kf, ks))
@@ -45,23 +51,23 @@ abstract class Parser[+A] { m =>
     def apply[R](st0: State, kf: Failure[R], ks: Success[A,R]): Result[R] =
       m(st0,kf,(st1:State, a: A) => n(st1, kf, (st2: State, b: B) => ks(st2, a)))
   }
-  final def ~ [B](n: Parser[B]): Parser[(A,B)] = new Parser[(A,B)] { 
+  final def ~ [B](n: Parser[B]): Parser[(A,B)] = new Parser[(A,B)] {
     override def toString = m infix ("~ " + n)
     def apply[R](st0: State, kf: Failure[R], ks: Success[(A,B),R]): Result[R] =
       m(st0,kf,(st1:State, a: A) => n(st1, kf, (st2: State, b: B) => ks(st2, (a, b))))
   }
   final def | [B >: A](n: => Parser[B]): Parser[B] = new Parser[B] {
     override def toString = m infix ("| ...")
-    def apply[R](st0: State, kf: Failure[R], ks: Success[B,R]): Result[R] = 
+    def apply[R](st0: State, kf: Failure[R], ks: Success[B,R]): Result[R] =
       m(st0.noAdds, (st1: State, stack: List[String], msg: String) => n(st0 + st1, kf, ks), ks)
   }
   final def cons [B >: A](n: => Parser[List[B]]): Parser[List[B]] = m flatMap (x => n map (xs => x :: xs))
-  final def || [B >: A](n: => Parser[B]): Parser[Either[A,B]] = new Parser[Either[A,B]] { 
+  final def || [B >: A](n: => Parser[B]): Parser[Either[A,B]] = new Parser[Either[A,B]] {
     override def toString = m infix ("|| " + n)
-    def apply[R](st0: State, kf: Failure[R], ks: Success[Either[A,B],R]): Result[R] = 
+    def apply[R](st0: State, kf: Failure[R], ks: Success[Either[A,B],R]): Result[R] =
       m(
-        st0.noAdds, 
-        (st1: State, stack: List[String], msg: String) => n (st0 + st1, kf, (st1: State, b: B) => ks(st1, Right(b))), 
+        st0.noAdds,
+        (st1: State, stack: List[String], msg: String) => n (st0 + st1, kf, (st1: State, b: B) => ks(st1, Right(b))),
         (st1: State, a: A) => ks(st1, Left(a))
       )
   }
@@ -72,24 +78,24 @@ abstract class Parser[+A] { m =>
   final def * : Parser[List[A]] = many(m)
 
   final def *(s: Parser[Any]): Parser[List[A]] = sepBy(m,s)
-  final def +(s: Parser[Any]): Parser[List[A]] = sepBy1(m,s) 
+  final def +(s: Parser[Any]): Parser[List[A]] = sepBy1(m,s)
 
   final def parse(b: String): ParseResult[A] = m(b, Fail(_,_,_), Done(_,_)).translate
 
-  final def as(s: => String): Parser[A] = new Parser[A] { 
+  final def as(s: => String): Parser[A] = new Parser[A] {
     override def toString = s
-    def apply[R](st0: State, kf: Failure[R], ks: Success[A,R]): Result[R] = 
+    def apply[R](st0: State, kf: Failure[R], ks: Success[A,R]): Result[R] =
       m(st0, (st1: State, stack: List[String], msg: String) => kf(st1, s :: stack, msg), ks)
   }
-  final def asOpaque(s: => String): Parser[A] = new Parser[A] { 
+  final def asOpaque(s: => String): Parser[A] = new Parser[A] {
     override def toString = s
-    def apply[R](st0: State, kf: Failure[R], ks: Success[A,R]): Result[R] = 
+    def apply[R](st0: State, kf: Failure[R], ks: Success[A,R]): Result[R] =
       m(st0, (st1: State, stack: List[String], msg: String) => kf(st1, Nil, "Failure reading:" + s), ks)
   }
 
 }
 
-sealed abstract class ParseResult[+A] { 
+sealed abstract class ParseResult[+A] {
   def map[B](f: A => B): ParseResult[B]
   def feed(s: String): ParseResult[A]
   def option: Option[A]
@@ -97,21 +103,21 @@ sealed abstract class ParseResult[+A] {
   def done: ParseResult[A] = feed("")
 }
 
-object ParseResult { 
-  case class Fail(input: String, stack: List[String], message: String) extends ParseResult[Nothing] { 
+object ParseResult {
+  case class Fail(input: String, stack: List[String], message: String) extends ParseResult[Nothing] {
     def map[B](f: Nothing => B) = Fail(input, stack, message)
     def feed(s: String) = this
     override def done = this
     def option = None
     def either = Left(message)
   }
-  case class Partial[+T](k: String => ParseResult[T]) extends ParseResult[T] { 
+  case class Partial[+T](k: String => ParseResult[T]) extends ParseResult[T] {
     def map[B](f: T => B) = Partial(s => k(s).map(f))
     def feed(s: String) = k(s)
     def option = None
     def either = Left("incomplete input")
   }
-  case class Done[+T](input: String, result: T) extends ParseResult[T] { 
+  case class Done[+T](input: String, result: T) extends ParseResult[T] {
     def map[B](f: T => B) = Done(input, f(result))
     def feed(s: String) = Done(input + s, result)
     override def done = this
@@ -124,36 +130,34 @@ object ParseResult {
   implicit def either[T](r: ParseResult[T]): Either[String,T] = r.either
 }
 
-object Parser { 
-  object Internal { 
-    sealed abstract class Result[+T] { 
+object Parser {
+  object Internal {
+    sealed abstract class Result[+T] {
       def translate: ParseResult[T]
     }
-    case class Fail(input: State, stack: List[String], message: String) extends Result[Nothing] { 
+    case class Fail(input: State, stack: List[String], message: String) extends Result[Nothing] {
       def translate = ParseResult.Fail(input.input, stack, message)
       def push(s: String) = Fail(input, stack = s :: stack, message)
     }
-    case class Partial[+T](k: String => Result[T]) extends Result[T] { 
+    case class Partial[+T](k: String => Result[T]) extends Result[T] {
       def translate = ParseResult.Partial(a => k(a).translate)
     }
-    case class Done[+T](input: State, result: T) extends Result[T] { 
+    case class Done[+T](input: State, result: T) extends Result[T] {
       def translate = ParseResult.Done(input.input, result)
     }
   }
   import Internal._
 
-  implicit def Monad : Monad[Parser] = new Monad[Parser] { 
-    def pure[A](a: => A): Parser[A] = ok(a)
-    def bind[A,B](ma: Parser[A], f: A => Parser[B]) = ma flatMap f
+  implicit val Monad : Monad[Parser] = new Monad[Parser] {
+    def point[A](a: => A): Parser[A] = ok(a)
+    def bind[A,B](ma: Parser[A])(f: A => Parser[B]) = ma flatMap f
   }
 
-  implicit def Plus: Plus[Parser] = new Plus[Parser] { 
+  implicit val Plus: PlusEmpty[Parser] = new PlusEmpty[Parser] {
     def plus[A](a: Parser[A], b: => Parser[A]): Parser[A] = a | b
-  }
-  implicit def Empty: Empty[Parser] = new Empty[Parser] {
     def empty[A]: Parser[A] = err("zero")
   }
-  implicit def Monoid[A]: Monoid[Parser[A]] = new Monoid[Parser[A]] { 
+  implicit def Monoid[A]: Monoid[Parser[A]] = new Monoid[Parser[A]] {
     def append(s1: Parser[A], s2: => Parser[A]): Parser[A] = s1 | s2
     val zero: Parser[A] = err("zero")
   }
@@ -171,26 +175,26 @@ object Parser {
   type Failure[+R] = (State,List[String],String) => Result[R]
   type Success[-A,+R] = (State, A) => Result[R]
 
-  def ok[A](a: A): Parser[A] = new Parser[A] { 
+  def ok[A](a: A): Parser[A] = new Parser[A] {
     override def toString = "ok(" + a + ")"
-    def apply[R](st0: State, kf: Failure[R], ks: Success[A,R]): Result[R] = 
+    def apply[R](st0: State, kf: Failure[R], ks: Success[A,R]): Result[R] =
       ks(st0,a)
   }
 
   def err(what: String): Parser[Nothing] = new Parser[Nothing] {
     override def toString = "err(" + what + ")"
-    def apply[R](st0: State, kf: Failure[R], ks: Success[Nothing,R]): Result[R] = 
+    def apply[R](st0: State, kf: Failure[R], ks: Success[Nothing,R]): Result[R] =
       kf(st0,Nil, "Failed reading: " + what)
   }
 
-  def prompt[R](st0: State, kf: State => Result[R], ks: State => Result[R]) = Partial[R](s => 
+  def prompt[R](st0: State, kf: State => Result[R], ks: State => Result[R]) = Partial[R](s =>
     if (s == "") kf(st0 copy (complete = true))
     else ks(st0 + s)
   )
 
   def demandInput: Parser[Unit] = new Parser[Unit] {
     override def toString = "demandInput"
-    def apply[R](st0: State, kf: Failure[R], ks: Success[Unit,R]): Result[R] = 
+    def apply[R](st0: State, kf: Failure[R], ks: Success[Unit,R]): Result[R] =
       if (st0.complete)
         kf(st0,List("demandInput"),"not enough bytes")
       else
@@ -199,7 +203,7 @@ object Parser {
 
   def ensure(n: Int): Parser[Unit] = new Parser[Unit] {
     override def toString = "ensure(" + n + ")"
-    def apply[R](st0: State, kf: Failure[R], ks: Success[Unit,R]): Result[R] = 
+    def apply[R](st0: State, kf: Failure[R], ks: Success[Unit,R]): Result[R] =
       if (st0.input.length >= n)
         ks(st0,())
       else
@@ -208,7 +212,7 @@ object Parser {
 
   def wantInput: Parser[Boolean] = new Parser[Boolean] {
     override def toString = "wantInput"
-    def apply[R](st0: State, kf: Failure[R], ks: Success[Boolean,R]): Result[R] = 
+    def apply[R](st0: State, kf: Failure[R], ks: Success[Boolean,R]): Result[R] =
       if (st0.input != "")   ks(st0,true)
       else if (st0.complete) ks(st0,false)
       else prompt(st0, a => ks(a,false), a => ks(a,true))
@@ -216,31 +220,31 @@ object Parser {
 
   def get: Parser[String] = new Parser[String] {
     override def toString = "get"
-    def apply[R](st0: State, kf: Failure[R], ks: Success[String,R]): Result[R] = 
+    def apply[R](st0: State, kf: Failure[R], ks: Success[String,R]): Result[R] =
       ks(st0,st0.input)
   }
 
   def put(s: String): Parser[Unit] = new Parser[Unit] {
     override def toString = "put(" + s + ")"
-    def apply[R](st0: State, kf: Failure[R], ks: Success[Unit,R]): Result[R] = 
+    def apply[R](st0: State, kf: Failure[R], ks: Success[Unit,R]): Result[R] =
       ks(st0 copy (input = s), ())
   }
 
   // attoparsec try
-  def attempt[T](p: Parser[T]): Parser[T] = new Parser[T] { 
+  def attempt[T](p: Parser[T]): Parser[T] = new Parser[T] {
     override def toString = "attempt(" + p + ")"
-    def apply[R](st0: State, kf: Failure[R], ks: Success[T,R]): Result[R] = 
+    def apply[R](st0: State, kf: Failure[R], ks: Success[T,R]): Result[R] =
       p(st0.noAdds, (st1: State, stack: List[String], msg: String) => kf(st0 + st1, stack, msg), ks)
   }
-  
-  def elem(p: Char => Boolean, what: => String = "elem(...)"): Parser[Char] = 
+
+  def elem(p: Char => Boolean, what: => String = "elem(...)"): Parser[Char] =
     ensure(1) ~> get flatMap (s => {
       val c = s.charAt(0)
       if (p(c)) put(s.substring(1)) ~> ok(c)
       else err(what)
     }) asOpaque what
- 
-  def skip(s: String, p: Char => Boolean, what: => String = "skip(...)"): Parser[Unit] = 
+
+  def skip(s: String, p: Char => Boolean, what: => String = "skip(...)"): Parser[Unit] =
     ensure(1) ~> get flatMap (s => {
       if (p(s.charAt(0))) put(s.substring(1))
       else err(what)
@@ -258,19 +262,19 @@ object Parser {
   implicit def char(c: Char): Parser[Char] = elem(_==c, "'" + c.toString + "'")
   implicit def string(s: String): Parser[String] = takeWith(s.length, _ == s, "\"" + s + "\"")
 
-  def stringTransform(f: String => String, s: String, what: => String = "stringTransform(...)"): Parser[String] = 
+  def stringTransform(f: String => String, s: String, what: => String = "stringTransform(...)"): Parser[String] =
     takeWith(s.length, f(_) == f(s), what)
 
   def endOfInput: Parser[Unit] = new Parser[Unit] {
     override def toString = "endOfInput"
-    def apply[R](st0: State, kf: Failure[R], ks: Success[Unit,R]): Result[R] = 
+    def apply[R](st0: State, kf: Failure[R], ks: Success[Unit,R]): Result[R] =
       if (st0.input == "") {
         if (st0.complete)
           ks(st0,())
-        else 
+        else
           demandInput(
             st0,
-            (st1: State, stack: List[String], msg: String) => ks(st0 + st1,()), 
+            (st1: State, stack: List[String], msg: String) => ks(st0 + st1,()),
             (st1: State, u: Unit) => kf(st0 + st1,Nil,"endOfInput")
           )
       } else kf(st0,Nil,"endOfInput")
@@ -285,18 +289,18 @@ object Parser {
 
   def many1[A](p: => Parser[A]): Parser[List[A]] = p cons many(p)
 
-  def manyTill[A](p: Parser[A], q: Parser[Any]): Parser[List[A]] = { 
+  def manyTill[A](p: Parser[A], q: Parser[Any]): Parser[List[A]] = {
     lazy val scan : Parser[List[A]] = (q ~> ok(Nil)) | (p cons scan)
     scan as ("manyTill(" + p + "," + q + ")")
   }
 
   def skipMany1(p: Parser[Any]): Parser[Unit] = (p ~> skipMany(p)) as ("skipMany1(" + p + ")")
 
-  def skipMany(p: Parser[Any]): Parser[Unit] = { 
-    lazy val scan : Parser[Unit] = (p ~> scan) | ok(()) 
+  def skipMany(p: Parser[Any]): Parser[Unit] = {
+    lazy val scan : Parser[Unit] = (p ~> scan) | ok(())
     scan as ("skipMany(" + p + ")")
   }
-      
+
   def sepBy[A](p: Parser[A], s: Parser[Any]): Parser[List[A]] =
     (p cons ((s ~> sepBy1(p,s)) | ok(Nil))) | ok(Nil) as ("sepBy(" + p + "," + s + ")")
 
@@ -305,10 +309,10 @@ object Parser {
     scan as ("sepBy1(" + p + "," + s + ")")
   }
 
-  def choice[A](xs : Parser[A]*) : Parser[A] = 
+  def choice[A](xs : Parser[A]*) : Parser[A] =
     (err("choice").asInstanceOf[Parser[A]] /: xs)(_ | _) as ("choice(" + xs.toString + " :_*)")
 
-  def choice[A](xs : TraversableOnce[Parser[A]]) : Parser[A] = 
+  def choice[A](xs : TraversableOnce[Parser[A]]) : Parser[A] =
     (err("choice").asInstanceOf[Parser[A]] /: xs)(_ | _) as ("choice(...)")
 
   def opt[A](m: Parser[A]): Parser[Option[A]] = (attempt(m).map(some(_)) | ok(none)) as ("opt(" + m + ")")
