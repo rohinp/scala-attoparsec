@@ -2,6 +2,7 @@ package attoparsec
 
 import scalaz._
 import scalaz.Scalaz._
+import scalaz.\/._
 
 import language.implicitConversions
 import language.higherKinds
@@ -62,13 +63,13 @@ abstract class Parser[+A] { m =>
       m(st0.noAdds, (st1: State, stack: List[String], msg: String) => n(st0 + st1, kf, ks), ks)
   }
   final def cons [B >: A](n: => Parser[List[B]]): Parser[List[B]] = m flatMap (x => n map (xs => x :: xs))
-  final def || [B >: A](n: => Parser[B]): Parser[Either[A,B]] = new Parser[Either[A,B]] {
+  final def || [B >: A](n: => Parser[B]): Parser[A \/ B] = new Parser[A \/ B] {
     override def toString = m infix ("|| " + n)
-    def apply[R](st0: State, kf: Failure[R], ks: Success[Either[A,B],R]): Result[R] =
+    def apply[R](st0: State, kf: Failure[R], ks: Success[A \/ B, R]): Result[R] =
       m(
         st0.noAdds,
-        (st1: State, stack: List[String], msg: String) => n (st0 + st1, kf, (st1: State, b: B) => ks(st1, Right(b))),
-        (st1: State, a: A) => ks(st1, Left(a))
+        (st1: State, stack: List[String], msg: String) => n (st0 + st1, kf, (st1: State, b: B) => ks(st1, right(b))),
+        (st1: State, a: A) => ks(st1, left(a))
       )
   }
   final def matching[B](f: PartialFunction[A,B]): Parser[B] = m.filter(f isDefinedAt _).map(f)
@@ -81,6 +82,12 @@ abstract class Parser[+A] { m =>
   final def +(s: Parser[Any]): Parser[List[A]] = sepBy1(m,s)
 
   final def parse(b: String): ParseResult[A] = m(b, Fail(_,_,_), Done(_,_)).translate
+
+  final def parseOnly[A](s: String) = m(State(s, "", true), Fail(_,_,_), Done(_,_)) match {
+    case Fail(_, _, e) => left(e)
+    case Done(_, a) => right(a)
+    case _ => sys.error("parseOnly: Parser returned a partial result")
+  }
 
   final def as(s: => String): Parser[A] = new Parser[A] {
     override def toString = s
@@ -99,7 +106,7 @@ sealed abstract class ParseResult[+A] {
   def map[B](f: A => B): ParseResult[B]
   def feed(s: String): ParseResult[A]
   def option: Option[A]
-  def either: Either[String,A]
+  def either: String \/ A
   def done: ParseResult[A] = feed("")
 }
 
@@ -109,25 +116,25 @@ object ParseResult {
     def feed(s: String) = this
     override def done = this
     def option = None
-    def either = Left(message)
+    def either = left(message)
   }
   case class Partial[+T](k: String => ParseResult[T]) extends ParseResult[T] {
     def map[B](f: T => B) = Partial(s => k(s).map(f))
     def feed(s: String) = k(s)
     def option = None
-    def either = Left("incomplete input")
+    def either = left("incomplete input")
   }
   case class Done[+T](input: String, result: T) extends ParseResult[T] {
     def map[B](f: T => B) = Done(input, f(result))
     def feed(s: String) = Done(input + s, result)
     override def done = this
     def option = Some(result)
-    def either = Right(result)
+    def either = right(result)
   }
 
   implicit def translate[T](r: Parser.Internal.Result[T]) : ParseResult[T] = r.translate
   implicit def option[T](r: ParseResult[T]): Option[T] = r.option
-  implicit def either[T](r: ParseResult[T]): Either[String,T] = r.either
+  implicit def either[T](r: ParseResult[T]): String \/ T = r.either
 }
 
 object Parser {
@@ -237,6 +244,8 @@ object Parser {
       p(st0.noAdds, (st1: State, stack: List[String], msg: String) => kf(st0 + st1, stack, msg), ks)
   }
 
+  def satisfy(p: Char => Boolean) = elem(p, "satisfy(...)"): Parser[Char]
+
   def elem(p: Char => Boolean, what: => String = "elem(...)"): Parser[Char] =
     ensure(1) ~> get flatMap (s => {
       val c = s.charAt(0)
@@ -259,8 +268,56 @@ object Parser {
 
   def take(n: Int): Parser[String] = takeWith(n, _ => true, "take(" + n + ")")
 
+  def takeWhile(p: Char => Boolean): Parser[String] = {
+    def go(acc: List[String]): Parser[List[String]] = for {
+      x <- get
+      (h, t) = x span p
+      _ <- put(t)
+      r <- if (t.isEmpty) for {
+        input <- wantInput
+        r <- if (input) go(h :: acc)
+             else ok(h :: acc)
+      } yield r else ok(h :: acc)
+    } yield r
+    go(Nil).map(_.reverse.concatenate)
+  }
+
+  // TODO: Add this to Scalaz
+  def when[M[_]:Monad](b: Boolean)(m: M[Unit]) =
+    if (b) m else implicitly[Monad[M]].pure(())
+
+  def takeWhile1(p: Char => Boolean): Parser[String] = for {
+    _ <- get map (_.isEmpty) flatMap (when(_)(demandInput))
+    s <- get
+    (h, t) = s span p
+    _ <- when(h.isEmpty)(err("takeWhile1"):Parser[Unit])
+    _ <- put(t)
+    r <- if (t.isEmpty) takeWhile(p).map(h + _) else ok(h)
+  } yield r
+
   implicit def char(c: Char): Parser[Char] = elem(_==c, "'" + c.toString + "'")
   implicit def string(s: String): Parser[String] = takeWith(s.length, _ == s, "\"" + s + "\"")
+
+  def signedInt: Parser[BigInt] = ('-' ~> decimal).map(- _) |
+                                   '+' ~> decimal |
+                                          decimal
+
+  val scientific: Parser[BigDecimal] = for {
+    positive <- satisfy(c => c == '-' || c == '+').map(_ == '+') | ok(true)
+    n <- decimal
+    s <- (satisfy(_ == '.') ~> takeWhile(_.isDigit).map(f =>
+      BigDecimal(n + "." + f))) | ok(BigDecimal(n))
+    sCoeff = if (positive) s else (- s)
+    r <- satisfy(c => c == 'e' || c == 'E') ~>
+         signedInt.flatMap(x =>
+           if (x > Int.MaxValue) err(s"Exponent too large: $x")
+           else ok(s * BigDecimal(10).pow(x.toInt))) | ok(sCoeff)
+  } yield r
+
+  private def addDigit(a: BigInt, c: Char) = a * 10 + (c - 48)
+
+  val decimal: Parser[BigInt] =
+    takeWhile1(_.isDigit).map(_.foldLeft(BigInt(0))(addDigit))
 
   def stringTransform(f: String => String, s: String, what: => String = "stringTransform(...)"): Parser[String] =
     takeWith(s.length, f(_) == f(s), what)
@@ -316,6 +373,38 @@ object Parser {
     (err("choice").asInstanceOf[Parser[A]] /: xs)(_ | _) as ("choice(...)")
 
   def opt[A](m: Parser[A]): Parser[Option[A]] = (attempt(m).map(some(_)) | ok(none)) as ("opt(" + m + ")")
+
+  sealed trait Scan[+S]
+  case class Continue[S](s: S) extends Scan[S]
+  case class Finished(n: Int, s: String) extends Scan[Nothing]
+
+  def scan[S](s: S)(p: (S, Char) => Option[S]): Parser[String] = {
+    def scanner(s: S, n: Int, t: String): Scan[S] = {
+      if (t.isEmpty) Continue(s)
+      else p(s, t.head) match {
+        case Some(s) => scanner(s, n + 1, t.tail)
+        case None => Finished(n, t)
+      }
+    }
+    def go(acc: List[String], s: S): Parser[List[String]] = for {
+      input <- get
+      r <- scanner(s, 0, input) match {
+        case Continue(sp) => for {
+          _ <- put("")
+          more <- wantInput
+          r <- if (more) go(input :: acc, sp) else ok(input :: acc)
+        } yield r
+        case Finished(n, t) => put(t).flatMap(_ => ok(input.take(n) :: acc))
+      }
+    } yield r
+    for {
+      chunks <- go(Nil, s)
+      r <- chunks match {
+        case List(x) => ok(x)
+        case xs => ok(xs.reverse.concatenate)
+      }
+    } yield r
+  }
 
   def parse[A](m: Parser[A], init: String): ParseResult[A] = m parse init
   def parse[M[_]:Monad, A](m: Parser[A], refill: M[String], init: String): M[ParseResult[A]] = {
