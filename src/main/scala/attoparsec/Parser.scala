@@ -42,16 +42,17 @@ abstract class Parser[+A] { m =>
   def withFilter(p: A => Boolean): WithFilter = new WithFilter(p)
   def filter(p: A => Boolean): Parser[A]      = new WithFilter(p)
 
-  final def ~> [B](n: Parser[B]): Parser[B] = new Parser[B] {
+  final def ~> [B](n: => Parser[B]): Parser[B] = new Parser[B] {
     override def toString = m infix ("~> " + n)
     def apply[R](st0: State, kf: Failure[R], ks: Success[B,R]): Result[R] =
       m(st0,kf,(s:State, a: A) => n(s, kf, ks))
   }
-  final def <~ [B](n: Parser[B]): Parser[A] = new Parser[A] {
+  final def <~ [B](n: => Parser[B]): Parser[A] = new Parser[A] {
     override def toString = m infix ("<~ " + n)
     def apply[R](st0: State, kf: Failure[R], ks: Success[A,R]): Result[R] =
       m(st0,kf,(st1:State, a: A) => n(st1, kf, (st2: State, b: B) => ks(st2, a)))
   }
+
   final def ~ [B](n: Parser[B]): Parser[(A,B)] = new Parser[(A,B)] {
     override def toString = m infix ("~ " + n)
     def apply[R](st0: State, kf: Failure[R], ks: Success[(A,B),R]): Result[R] =
@@ -74,9 +75,9 @@ abstract class Parser[+A] { m =>
   }
   final def matching[B](f: PartialFunction[A,B]): Parser[B] = m.filter(f isDefinedAt _).map(f)
 
-  final def ? : Parser[Option[A]] = opt(m)
-  final def + : Parser[List[A]] = many1(m)
-  final def * : Parser[List[A]] = many(m)
+  final lazy val ? : Parser[Option[A]] = opt(m)
+  final lazy val + : Parser[List[A]] = many1(m)
+  final lazy val * : Parser[List[A]] = many(m)
 
   final def *(s: Parser[Any]): Parser[List[A]] = sepBy(m,s)
   final def +(s: Parser[Any]): Parser[List[A]] = sepBy1(m,s)
@@ -138,6 +139,7 @@ object ParseResult {
 }
 
 object Parser {
+
   object Internal {
     sealed abstract class Result[+T] {
       def translate: ParseResult[T]
@@ -155,12 +157,12 @@ object Parser {
   }
   import Internal._
 
-  implicit val Monad : Monad[Parser] = new Monad[Parser] {
+  implicit lazy val Monad : Monad[Parser] = new Monad[Parser] {
     def point[A](a: => A): Parser[A] = ok(a)
     def bind[A,B](ma: Parser[A])(f: A => Parser[B]) = ma flatMap f
   }
 
-  implicit val Plus: PlusEmpty[Parser] = new PlusEmpty[Parser] {
+  implicit lazy val Plus: PlusEmpty[Parser] = new PlusEmpty[Parser] {
     def plus[A](a: Parser[A], b: => Parser[A]): Parser[A] = a | b
     def empty[A]: Parser[A] = err("zero")
   }
@@ -199,7 +201,7 @@ object Parser {
     else ks(st0 + s)
   )
 
-  def demandInput: Parser[Unit] = new Parser[Unit] {
+  lazy val demandInput: Parser[Unit] = new Parser[Unit] {
     override def toString = "demandInput"
     def apply[R](st0: State, kf: Failure[R], ks: Success[Unit,R]): Result[R] =
       if (st0.complete)
@@ -217,7 +219,7 @@ object Parser {
         (demandInput ~> ensure(n))(st0,kf,ks)
   }
 
-  def wantInput: Parser[Boolean] = new Parser[Boolean] {
+  lazy val wantInput: Parser[Boolean] = new Parser[Boolean] {
     override def toString = "wantInput"
     def apply[R](st0: State, kf: Failure[R], ks: Success[Boolean,R]): Result[R] =
       if (st0.input != "")   ks(st0,true)
@@ -225,7 +227,9 @@ object Parser {
       else prompt(st0, a => ks(a,false), a => ks(a,true))
   }
 
-  def get: Parser[String] = new Parser[String] {
+  lazy val atEnd: Parser[Boolean] = atEnd map (!_)
+
+  lazy val get: Parser[String] = new Parser[String] {
     override def toString = "get"
     def apply[R](st0: State, kf: Failure[R], ks: Success[String,R]): Result[R] =
       ks(st0,st0.input)
@@ -268,6 +272,10 @@ object Parser {
 
   def take(n: Int): Parser[String] = takeWith(n, _ => true, "take(" + n + ")")
 
+  lazy val anyChar: Parser[Char] = satisfy(_ => true)
+
+  def notChar(c: Char): Parser[Char] = satisfy(_ != c) as ("not '" + c + "'")
+
   def takeWhile(p: Char => Boolean): Parser[String] = {
     def go(acc: List[String]): Parser[List[String]] = for {
       x <- get
@@ -281,6 +289,21 @@ object Parser {
     } yield r
     go(Nil).map(_.reverse.concatenate)
   }
+
+  lazy val takeRest: Parser[List[String]] = {
+    def go(acc: List[String]): Parser[List[String]] = for {
+      input <- wantInput
+      r <- if (input) for {
+        s <- get
+        _ <- put("")
+        r <- go(s :: acc)
+      } yield r else ok(acc.reverse)
+    } yield r
+    go(Nil)
+  }
+
+  lazy val takeText: Parser[String] =
+    takeRest map (_.concatenate)
 
   // TODO: Add this to Scalaz
   def when[M[_]:Monad](b: Boolean)(m: M[Unit]) =
@@ -298,11 +321,10 @@ object Parser {
   implicit def char(c: Char): Parser[Char] = elem(_==c, "'" + c.toString + "'")
   implicit def string(s: String): Parser[String] = takeWith(s.length, _ == s, "\"" + s + "\"")
 
-  def signedInt: Parser[BigInt] = ('-' ~> decimal).map(- _) |
-                                   '+' ~> decimal |
-                                          decimal
+  lazy val signedInt: Parser[BigInt] =
+    (char('-') ~> decimal).map(- _) | char('+') ~> decimal | decimal
 
-  val scientific: Parser[BigDecimal] = for {
+  lazy val scientific: Parser[BigDecimal] = for {
     positive <- satisfy(c => c == '-' || c == '+').map(_ == '+') | ok(true)
     n <- decimal
     s <- (satisfy(_ == '.') ~> takeWhile(_.isDigit).map(f =>
@@ -316,13 +338,13 @@ object Parser {
 
   private def addDigit(a: BigInt, c: Char) = a * 10 + (c - 48)
 
-  val decimal: Parser[BigInt] =
+  lazy val decimal: Parser[BigInt] =
     takeWhile1(_.isDigit).map(_.foldLeft(BigInt(0))(addDigit))
 
   def stringTransform(f: String => String, s: String, what: => String = "stringTransform(...)"): Parser[String] =
     takeWith(s.length, f(_) == f(s), what)
 
-  def endOfInput: Parser[Unit] = new Parser[Unit] {
+  lazy val endOfInput: Parser[Unit] = new Parser[Unit] {
     override def toString = "endOfInput"
     def apply[R](st0: State, kf: Failure[R], ks: Success[Unit,R]): Result[R] =
       if (st0.input == "") {
