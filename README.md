@@ -19,7 +19,13 @@ $ ./sbt
 
 ## Using Attoparsec in your project ##
 
-With SBT, add this to your build.sbt:
+With SBT, add a resolver to your build.sbt:
+
+```
+resolvers += "Runar's Bintray" at "https://bintray.com/runarorama/maven"
+```
+
+Then add a library dependency:
 
 ```
 libraryDependencies += "com.comonad" %% "scala-attoparsec" % "0.2"

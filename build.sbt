@@ -16,3 +16,7 @@ libraryDependencies += "org.scalaz" %% "scalaz-core" % "7.0.5"
 
 libraryDependencies += "org.scalacheck" %% "scalacheck" % "1.10.1" % "test"
 
+seq(bintrayPublishSettings:_*)
+
+licenses += ("BSD", url("http://opensource.org/licenses/BSD"))
+
