@@ -384,7 +384,7 @@ object Parser {
     (p cons ((s ~> sepBy1(p,s)) | ok(Nil))) | ok(Nil) as ("sepBy(" + p + "," + s + ")")
 
   def sepBy1[A](p: Parser[A], s: Parser[Any]): Parser[List[A]] = {
-    lazy val scan : Parser[List[A]] = (p cons (s ~> scan)) | ok(Nil)
+    lazy val scan : Parser[List[A]] = (p cons ((s ~> scan) | ok(Nil)))
     scan as ("sepBy1(" + p + "," + s + ")")
   }
 
