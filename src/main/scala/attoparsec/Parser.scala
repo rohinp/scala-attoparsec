@@ -227,7 +227,7 @@ object Parser {
       else prompt(st0, a => ks(a,false), a => ks(a,true))
   }
 
-  lazy val atEnd: Parser[Boolean] = atEnd map (!_)
+  lazy val atEnd: Parser[Boolean] = wantInput map (!_)
 
   lazy val get: Parser[String] = new Parser[String] {
     override def toString = "get"
